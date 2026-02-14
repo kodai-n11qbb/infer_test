@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
 リアルタイム自動運転システム
-画面から運転環境を解析し、適切な運転指示を生成する
+PCカメラから運転環境を解析し、適切な運転指示を生成する
 """
 
 import cv2
 import numpy as np
 import torch
 from ultralytics import YOLO
-import mss
-import pyautogui
 import time
 from collections import deque
-import threading
 from dataclasses import dataclass
 from typing import Tuple, List, Optional
 import math
@@ -331,31 +328,72 @@ class AutonomousDrivingSystem:
         self.frame_count = 0
         self.start_time = time.time()
         
-        # スクリーンキャプチャの設定
-        self.monitor = {"top": 100, "left": 100, "width": 800, "height": 600}
+        # PC内蔵カメラの設定
+        self.camera_id = 0  # 通常0が内蔵カメラ
+        self.cap = None
+        self.frame_width = 640
+        self.frame_height = 480
     
     def start(self):
         """システムを起動"""
         print("自動運転システムを起動中...")
         self.running = True
         
+        # カメラを初期化
+        print("カメラを初期化中...")
+        self.cap = cv2.VideoCapture(self.camera_id)
+        
+        # カメラが開けない場合の詳細エラー処理
+        if not self.cap.isOpened():
+            print(f"エラー: カメラID {self.camera_id} を開けません")
+            print("考えられる原因:")
+            print("1. macOSのカメラ権限がありません")
+            print("2. カメラが他のアプリで使用中です")
+            print("3. カメラが接続されていません")
+            print("\n解決方法:")
+            print("1. システム設定 > プライバシーとセキュリティ > カメラ で権限を許可")
+            print("2. 他のアプリ（Zoom、FaceTimeなど）を終了")
+            print("3. カメラを再接続")
+            return
+        
+        # カメラ設定
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_height)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # レイテンシ低減
+        
+        # 実際のカメラ設定を取得
+        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        
+        print(f"カメラを初期化しました: {actual_width}x{actual_height} @ {actual_fps}fps")
+        
         try:
             self._main_loop()
         except KeyboardInterrupt:
             print("\nシステムを停止します...")
+        except Exception as e:
+            print(f"\nエラーが発生しました: {e}")
         finally:
             self.running = False
+            if self.cap is not None:
+                self.cap.release()
+                print("カメラを解放しました")
     
     def _main_loop(self):
         """メイン処理ループ"""
-        with mss.mss() as sct:
-            while self.running:
-                loop_start = time.time()
-                
-                # スクリーンキャプチャ
-                frame = self._capture_screen(sct)
-                if frame is None:
-                    continue
+        while self.running:
+            loop_start = time.time()
+            
+            # カメラからフレームを取得
+            ret, frame = self.cap.read()
+            if not ret:
+                print("カメラからフレームを取得できません")
+                break
+            
+            if frame is None:
+                continue
                 
                 # 車線検出
                 left_lane, right_lane = self.lane_detector.detect_lanes(frame)
@@ -377,16 +415,6 @@ class AutonomousDrivingSystem:
                 if elapsed < 1/30:
                     time.sleep(1/30 - elapsed)
     
-    def _capture_screen(self, sct) -> Optional[np.ndarray]:
-        """スクリーンからフレームをキャプチャ"""
-        try:
-            sct_img = sct.grab(self.monitor)
-            frame = np.array(sct_img)
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-            return frame
-        except Exception as e:
-            print(f"スクリーンキャプチャエラー: {e}")
-            return None
     
     def _visualize_results(self, frame: np.ndarray, left_lane: Optional[np.ndarray], 
                           right_lane: Optional[np.ndarray], objects: List[dict], 
@@ -459,7 +487,7 @@ def main():
     """メイン関数"""
     print("=" * 50)
     print("リアルタイム自動運転システム")
-    print("画面から運転環境を解析し、適切な指示を生成")
+    print("PCカメラから運転環境を解析し、適切な指示を生成")
     print("=" * 50)
     print("\n制御:")
     print("- ESCキー: システム停止")

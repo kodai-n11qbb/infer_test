@@ -3,12 +3,15 @@
 システムの動作パラメータを管理
 """
 
-# スクリーンキャプチャ設定
-SCREEN_CAPTURE = {
-    "top": 100,        # キャプチャ開始Y座標
-    "left": 100,       # キャプチャ開始X座標
-    "width": 800,      # キャプチャ幅
-    "height": 600      # キャプチャ高さ
+import cv2
+
+# PCカメラ設定
+CAMERA = {
+    "camera_id": 0,           # カメラID（通常0が内蔵カメラ）
+    "frame_width": 640,       # フレーム幅
+    "frame_height": 480,      # フレーム高さ
+    "fps": 30,               # 目標FPS
+    "buffer_size": 1         # カメラバッファサイズ
 }
 
 # 車線検出設定
