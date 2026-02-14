@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import time
 import argparse
-import json
+import tomllib
 import os
 from typing import Dict, Any, List, Tuple
 from dataclasses import dataclass
@@ -23,35 +23,43 @@ class SafetyConfig:
     detection_range: float = 20.0     # 検知範囲（m）
     
     @classmethod
-    def from_file(cls, filename: str = "safety_config.json"):
+    def from_file(cls, filename: str = "safety_config.toml"):
         """設定ファイルから読み込み"""
         if os.path.exists(filename):
             try:
-                with open(filename, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                return cls(**data)
+                with open(filename, 'rb') as f:
+                    data = tomllib.load(f)
+
+                return cls(
+                    emergency_distance=float(data.get('emergency_distance', 5.0)),
+                    caution_distance=float(data.get('caution_distance', 10.0)),
+                    safe_distance=float(data.get('safe_distance', 15.0)),
+                    detection_range=float(data.get('detection_range', 20.0)),
+                )
             except Exception as e:
                 print(f"設定ファイル読み込みエラー: {e}")
                 return cls()
         return cls()
     
-    def to_file(self, filename: str = "safety_config.json"):
+    def to_file(self, filename: str = "safety_config.toml"):
         """設定ファイルに保存"""
         try:
+            # tomllib は読み込み専用なので、最小限のTOMLを自前で書き出す
+            content = (
+                f"emergency_distance = {self.emergency_distance}\n"
+                f"caution_distance = {self.caution_distance}\n"
+                f"safe_distance = {self.safe_distance}\n"
+                f"detection_range = {self.detection_range}\n"
+            )
             with open(filename, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'emergency_distance': self.emergency_distance,
-                    'caution_distance': self.caution_distance,
-                    'safe_distance': self.safe_distance,
-                    'detection_range': self.detection_range
-                }, f, indent=2, ensure_ascii=False)
+                f.write(content)
             print(f"設定を {filename} に保存しました")
         except Exception as e:
             print(f"設定ファイル保存エラー: {e}")
 
 @dataclass
 class InferConfig:
-    """infer.jsonから読み込む全設定データクラス"""
+    """設定ファイルから読み込む全設定データクラス"""
     safety_distances: SafetyConfig
     detection_settings: Dict[str, Any]
     ui_settings: Dict[str, Any]
@@ -61,9 +69,9 @@ class InferConfig:
     distance_estimation: Dict[str, Any]
     
     @classmethod
-    def from_infer_file(cls, filename: str = "infer.json"):
+    def from_infer_file(cls, filename: str = "infer.toml"):
         """
-        infer.jsonファイルから全設定を読み込み
+        設定ファイルから全設定を読み込み
         外部設定ファイルでシステム全体を制御
         """
         if not os.path.exists(filename):
@@ -71,8 +79,8 @@ class InferConfig:
             return cls._get_default_config()
         
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            with open(filename, 'rb') as f:
+                data = tomllib.load(f)
             
             # 安全距離設定をSafetyConfigオブジェクトに変換
             safety_data = data.get('safety_distances', {})
@@ -94,7 +102,7 @@ class InferConfig:
             )
             
         except Exception as e:
-            print(f"infer.json読み込みエラー: {e}")
+            print(f"設定ファイル読み込みエラー: {e}")
             print("デフォルト設定を使用します")
             return cls._get_default_config()
     
@@ -126,7 +134,7 @@ class InferConfig:
         return True
 
 class SimpleDetector:
-    """シンプルな障害物検出器 - infer.json設定対応"""
+    """シンプルな障害物検出器 - infer.toml設定対応"""
     
     def __init__(self, config: InferConfig):
         """
@@ -168,7 +176,7 @@ class SimpleDetector:
     
     def detect(self, frame: np.ndarray) -> List[Dict]:
         """
-        障害物を検出 - infer.jsonの設定を使用
+        障害物を検出 - infer.tomlの設定を使用
         戻り値: 検出された障害物リスト
         """
         self.frame_count += 1
@@ -176,7 +184,7 @@ class SimpleDetector:
         # HSV色空間に変換
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
-        # infer.jsonから色範囲を取得
+        # infer.tomlから色範囲を取得
         color_ranges = self.config.color_ranges
         if not color_ranges:
             # デフォルト色範囲
@@ -208,7 +216,7 @@ class SimpleDetector:
         for contour in contours:
             area = cv2.contourArea(contour)
             
-            # infer.jsonの設定でフィルタリング
+            # infer.tomlの設定でフィルタリング
             if area < self.min_object_area or area > self.max_object_area:
                 continue
             
@@ -220,10 +228,10 @@ class SimpleDetector:
             if aspect_ratio < self.aspect_ratio_min or aspect_ratio > self.aspect_ratio_max:
                 continue
             
-            # 距離推定（infer.jsonの設定を使用）
+            # 距離推定（infer.tomlの設定を使用）
             distance = self._estimate_distance(w, h)
             
-            # 物体タイプ判定（infer.jsonの設定を使用）
+            # 物体タイプ判定（infer.tomlの設定を使用）
             obj_type = self._classify_object(hsv[y:y+h, x:x+w], w, h)
             
             # 信頼度計算
@@ -243,11 +251,11 @@ class SimpleDetector:
     
     def _estimate_distance(self, width: int, height: int) -> float:
         """
-        物体サイズから距離を推定 - infer.jsonの設定を使用
+        物体サイズから距離を推定 - infer.tomlの設定を使用
         """
         area = width * height
         
-        # infer.jsonの閾値設定を使用
+        # infer.tomlの閾値設定を使用
         if area > self.very_close_threshold:
             return self.very_close_distance
         elif area > self.close_threshold:
@@ -261,12 +269,12 @@ class SimpleDetector:
     
     def _classify_object(self, roi_hsv: np.ndarray, width: int, height: int) -> str:
         """
-        物体タイプを分類 - infer.jsonの設定を使用
+        物体タイプを分類 - infer.tomlの設定を使用
         """
         # 平均色を取得
         mean_color = np.mean(roi_hsv, axis=(0, 1))
         
-        # サイズと色で分類（infer.jsonの閾値を使用）
+        # サイズと色で分類（infer.tomlの閾値を使用）
         area = width * height
         
         if area > self.large_vehicle_threshold:
@@ -348,8 +356,91 @@ class DirectionDecider:
             'distance': None
         }
 
+class FinalInstructionDecider:
+    """最終指示（前進/後進/右/左/停止）を確定する"""
+
+    def __init__(self, safety_config: SafetyConfig, frame_width: int = 640):
+        self.config = safety_config
+        self.frame_width = frame_width
+
+    def decide(self, objects: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """停止/後進/右/左/前進 のいずれかを返す"""
+
+        left_bound = self.frame_width // 3
+        right_bound = (self.frame_width * 2) // 3
+        front_center = self.frame_width // 2
+
+        left_objects: List[Dict[str, Any]] = []
+        front_objects: List[Dict[str, Any]] = []
+        right_objects: List[Dict[str, Any]] = []
+
+        for obj in objects:
+            x1, _, x2, _ = obj['bbox']
+            obj_center_x = (x1 + x2) // 2
+
+            if abs(obj_center_x - front_center) < 100:
+                front_objects.append(obj)
+            elif obj_center_x < left_bound:
+                left_objects.append(obj)
+            elif obj_center_x > right_bound:
+                right_objects.append(obj)
+
+        closest_front = min(front_objects, key=lambda x: x['distance']) if front_objects else None
+        closest_left = min(left_objects, key=lambda x: x['distance']) if left_objects else None
+        closest_right = min(right_objects, key=lambda x: x['distance']) if right_objects else None
+
+        if closest_front and closest_front['distance'] <= self.config.emergency_distance:
+            return {
+                'final_action': '停止',
+                'urgency': 10,
+                'reason': f"緊急停止：前方{closest_front['type']}が{closest_front['distance']:.1f}m（設定: {self.config.emergency_distance}m）",
+                'confidence': 0.95,
+            }
+
+        if closest_front and closest_front['distance'] <= self.config.caution_distance:
+            left_clearance = closest_left['distance'] if closest_left else float('inf')
+            right_clearance = closest_right['distance'] if closest_right else float('inf')
+
+            if left_clearance <= self.config.caution_distance and right_clearance <= self.config.caution_distance:
+                return {
+                    'final_action': '後進',
+                    'urgency': 8,
+                    'reason': f"回避不能：前方{closest_front['distance']:.1f}m & 左右も近接（設定: {self.config.caution_distance}m）",
+                    'confidence': 0.85,
+                }
+
+            if right_clearance > left_clearance:
+                return {
+                    'final_action': '右',
+                    'urgency': 7,
+                    'reason': f"回避：右がより空いている（右={right_clearance:.1f}m, 左={left_clearance:.1f}m）",
+                    'confidence': 0.8,
+                }
+
+            return {
+                'final_action': '左',
+                'urgency': 7,
+                'reason': f"回避：左がより空いている（左={left_clearance:.1f}m, 右={right_clearance:.1f}m）",
+                'confidence': 0.8,
+            }
+
+        if closest_front and closest_front['distance'] <= self.config.safe_distance:
+            return {
+                'final_action': '前進',
+                'urgency': 3,
+                'reason': f"慎重前進：前方{closest_front['type']}が{closest_front['distance']:.1f}m（設定: {self.config.safe_distance}m）",
+                'confidence': 0.7,
+            }
+
+        return {
+            'final_action': '前進',
+            'urgency': 1,
+            'reason': f"前方安全：障害物なし（検知範囲: {self.config.detection_range}m）",
+            'confidence': 0.9,
+        }
+
 class RCController:
-    """ラジコン式コントローラー - infer.json完全対応"""
+    """ラジコン式コントローラー - infer.toml完全対応"""
     
     def __init__(self, config: InferConfig):
         """
@@ -377,8 +468,9 @@ class RCController:
         # 検出器と意思決定器を設定で初期化
         self.detector = SimpleDetector(config)
         self.decider = DirectionDecider(config.safety_distances)
+        self.final_decider = FinalInstructionDecider(config.safety_distances)
         
-        print(f"infer.json設定を読み込み:")
+        print(f"infer.toml設定を読み込み:")
         print(f"- 緊急停止: {config.safety_distances.emergency_distance}m")
         print(f"- 注意距離: {config.safety_distances.caution_distance}m") 
         print(f"- 安全距離: {config.safety_distances.safe_distance}m")
@@ -389,10 +481,10 @@ class RCController:
     def start(self):
         """システム起動"""
         print("=" * 60)
-        print("ラジコン式進行方向指示システム - infer.json対応")
+        print("ラジコン式進行方向指示システム - infer.toml対応")
         print("=" * 60)
         print("特徴:")
-        print("- infer.jsonで全設定を外部制御")
+        print("- infer.tomlで全設定を外部制御")
         print("- 前方方向への進行可否をリアルタイム表示")
         print("- シンプルなUIで直感的な操作")
         print("- ESCキーで終了")
@@ -413,14 +505,14 @@ class RCController:
     
     def _init_camera(self) -> bool:
         """
-        カメラ初期化 - infer.jsonの設定を使用
+        カメラ初期化 - infer.tomlの設定を使用
         """
         self.cap = cv2.VideoCapture(self.camera_id)
         if not self.cap.isOpened():
             print(f"カメラID {self.camera_id} を開けません")
             return False
         
-        # infer.jsonのカメラ設定を適用
+        # infer.tomlのカメラ設定を適用
         camera_config = self.config.camera_settings
         width = camera_config.get('width', 640)
         height = camera_config.get('height', 480)
@@ -435,6 +527,8 @@ class RCController:
         actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        
+        self.final_decider.frame_width = actual_width
         
         print(f"カメラ初期化完了: {actual_width}x{actual_height} @ {actual_fps}fps")
         return True
@@ -456,21 +550,24 @@ class RCController:
             
             # 進行方向決定
             decision = self.decider.decide_direction(objects)
+
+            # 最終指示（5種）
+            final_decision = self.final_decider.decide(objects)
             
             # FPS更新
             elapsed = time.time() - self.start_time
             self.fps = self.frame_count / elapsed if elapsed > 0 else 0
             
             # UI描画
-            self._draw_ui(frame, decision, objects)
+            self._draw_ui(frame, decision, final_decision, objects)
             
             # フレームレート制御
             process_time = time.time() - loop_start
             if process_time < 1/30:
                 time.sleep(1/30 - process_time)
     
-    def _draw_ui(self, frame: np.ndarray, decision: Dict[str, Any], objects: List[Dict]):
-        """シンプルなUIを描画 - 進行方向指示"""
+    def _draw_ui(self, frame: np.ndarray, decision: Dict[str, Any], final_decision: Dict[str, Any], objects: List[Dict]):
+        """シンプルなUIを描画 - 最終指示（5種）"""
         vis_frame = frame.copy()
         height, width = vis_frame.shape[:2]
         
@@ -480,60 +577,53 @@ class RCController:
         # === 中央の進行方向インジケーター ===
         center_x = width // 2
         center_y = height // 2
-        
-        # 進行可否に応じた色と矢印
-        if decision['action'] == "STOP":
-            # 停止 - 赤いX印
-            arrow_color = (0, 0, 255)  # 赤
+
+        final_action = final_decision['final_action']
+        if final_action == "停止":
+            arrow_color = (0, 0, 255)
             arrow_size = 80
-            cv2.line(vis_frame, (center_x - arrow_size, center_y - arrow_size), 
-                    (center_x + arrow_size, center_y + arrow_size), arrow_color, 8)
-            cv2.line(vis_frame, (center_x + arrow_size, center_y - arrow_size), 
-                    (center_x - arrow_size, center_y + arrow_size), arrow_color, 8)
-            direction_text = "STOP"
-            
-        elif decision['action'] == "SLOW":
-            # 減速 - オレンジ色の下矢印
-            arrow_color = (0, 165, 255)  # オレンジ
+            cv2.line(vis_frame, (center_x - arrow_size, center_y - arrow_size),
+                     (center_x + arrow_size, center_y + arrow_size), arrow_color, 8)
+            cv2.line(vis_frame, (center_x + arrow_size, center_y - arrow_size),
+                     (center_x - arrow_size, center_y + arrow_size), arrow_color, 8)
+        elif final_action == "後進":
+            arrow_color = (0, 165, 255)
             self._draw_down_arrow(vis_frame, center_x, center_y, arrow_color)
-            direction_text = "SLOW"
-            
-        elif decision['action'] == "CAREFUL":
-            # 注意進行 - 黄色の上矢印
-            arrow_color = (0, 255, 255)  # 黄色
+        elif final_action == "左":
+            arrow_color = (255, 255, 0)
+            self._draw_left_arrow(vis_frame, center_x, center_y, arrow_color)
+        elif final_action == "右":
+            arrow_color = (255, 255, 0)
+            self._draw_right_arrow(vis_frame, center_x, center_y, arrow_color)
+        else:
+            arrow_color = (0, 255, 0)
             self._draw_up_arrow(vis_frame, center_x, center_y, arrow_color)
-            direction_text = "CAREFUL"
-            
-        else:  # GO
-            # 前進 OK - 緑色の上矢印
-            arrow_color = (0, 255, 0)  # 緑
-            self._draw_up_arrow(vis_frame, center_x, center_y, arrow_color)
-            direction_text = "GO"
         
         # === 方向テキスト表示 ===
         text_bg_color = (0, 0, 0)
         cv2.rectangle(vis_frame, (center_x - 60, center_y + 100), 
                       (center_x + 60, center_y + 140), text_bg_color, -1)
-        cv2.putText(vis_frame, direction_text, (center_x - 40, center_y + 125), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.5, arrow_color, 3)
+        direction_text = final_action
+        cv2.putText(vis_frame, direction_text, (center_x - 40, center_y + 125),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, arrow_color, 3)
         
         # === 上部ステータスバー ===
         # ステータス背景
         cv2.rectangle(vis_frame, (0, 0), (width, 80), (0, 0, 0), -1)
         
         # 進行可否ステータス
-        if decision['urgency'] >= 8:
-            status_text = "DANGER - STOP IMMEDIATELY"
+        if final_decision['urgency'] >= 8:
+            status_text = "DANGER"
             status_color = (0, 0, 255)
-        elif decision['urgency'] >= 5:
-            status_text = "CAUTION - PROCEED CAREFULLY"
+        elif final_decision['urgency'] >= 5:
+            status_text = "CAUTION"
             status_color = (0, 165, 255)
         else:
-            status_text = "SAFE - PROCEED FORWARD"
+            status_text = "SAFE"
             status_color = (0, 255, 0)
-        
-        cv2.putText(vis_frame, status_text, (10, 35), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+
+        cv2.putText(vis_frame, status_text, (10, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
         
         # 理由表示
         reason_text = decision['reason'][:40] + "..." if len(decision['reason']) > 40 else decision['reason']
@@ -563,7 +653,7 @@ class RCController:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, obstacle_color, 2)
         
         # システム情報
-        info_text = f"FPS: {self.fps:.1f} | Time: {int(time.time() - self.start_time)}s | Confidence: {decision['confidence']:.2f}"
+        info_text = f"FPS: {self.fps:.1f} | Time: {int(time.time() - self.start_time)}s | Confidence: {final_decision['confidence']:.2f}"
         cv2.putText(vis_frame, info_text, (10, height - 20), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         
@@ -591,7 +681,7 @@ class RCController:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, box_color, 1)
         
         # === 緊急時の警告表示 ===
-        if decision['urgency'] >= 8:
+        if final_decision['urgency'] >= 8:
             # 点滅警告
             if int(time.time() * 4) % 2 == 0:
                 # 画面全体に赤枠
@@ -601,223 +691,17 @@ class RCController:
                            cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 5)
         
         # === 制御ヒント ===
-        hint_text = "ESC: Exit | Use --help to configure distances"
+        hint_text = "ESC: Exit | Arrow shows final instruction"
         cv2.putText(vis_frame, hint_text, (10, height - 5), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
         
         # 表示
-        cv2.imshow('RC Controller - Configurable Safety Distances', vis_frame)
+        cv2.imshow('RC Controller - Final Instruction (5 actions)', vis_frame)
         
         # ESCキーで終了
         if cv2.waitKey(1) & 0xFF == 27:
             self.running = False
     
-    def start(self):
-        """システム起動"""
-        print("=" * 50)
-        print("ラジコン式進行方向指示システム")
-        print("=" * 50)
-        print("特徴:")
-        print("- 前方方向への進行可否をリアルタイム表示")
-        print("- シンプルなUIで直感的な操作")
-        print("- ESCキーで終了")
-        print("-" * 50)
-        
-        # カメラ初期化
-        if not self._init_camera():
-            return
-        
-        self.running = True
-        
-        try:
-            self._main_loop()
-        except KeyboardInterrupt:
-            print("\nシステムを停止します...")
-        finally:
-            self._cleanup()
-    
-    def _init_camera(self) -> bool:
-        """カメラ初期化"""
-        self.cap = cv2.VideoCapture(self.camera_id)
-        if not self.cap.isOpened():
-            print("カメラを開けません")
-            return False
-        
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
-        print("カメラ初期化完了")
-        return True
-    
-    def _main_loop(self):
-        """メインループ"""
-        while self.running:
-            loop_start = time.time()
-            
-            # フレーム取得
-            ret, frame = self.cap.read()
-            if not ret or frame is None:
-                continue
-            
-            self.frame_count += 1
-            
-            # 障害物検出
-            objects = self.detector.detect(frame)
-            
-            # 進行方向決定
-            decision = self.decider.decide_direction(objects)
-            
-            # FPS更新
-            elapsed = time.time() - self.start_time
-            self.fps = self.frame_count / elapsed if elapsed > 0 else 0
-            
-            # UI描画
-            self._draw_ui(frame, decision, objects)
-            
-            # フレームレート制御
-            process_time = time.time() - loop_start
-            if process_time < 1/30:
-                time.sleep(1/30 - process_time)
-    
-    def _draw_ui(self, frame: np.ndarray, decision: Dict[str, Any], objects: List[Dict]):
-        """シンプルなUIを描画 - 進行方向指示"""
-        vis_frame = frame.copy()
-        height, width = vis_frame.shape[:2]
-        
-        # 背景を少し暗くしてUIを見やすく
-        vis_frame = cv2.convertScaleAbs(vis_frame, alpha=0.8, beta=0)
-        
-        # === 中央の進行方向インジケーター ===
-        center_x = width // 2
-        center_y = height // 2
-        
-        # 進行可否に応じた色と矢印
-        if decision['action'] == "STOP":
-            # 停止 - 赤いX印
-            arrow_color = (0, 0, 255)  # 赤
-            arrow_size = 80
-            cv2.line(vis_frame, (center_x - arrow_size, center_y - arrow_size), 
-                    (center_x + arrow_size, center_y + arrow_size), arrow_color, 8)
-            cv2.line(vis_frame, (center_x + arrow_size, center_y - arrow_size), 
-                    (center_x - arrow_size, center_y + arrow_size), arrow_color, 8)
-            direction_text = "STOP"
-            
-        elif decision['action'] == "SLOW":
-            # 減速 - オレンジ色の下矢印
-            arrow_color = (0, 165, 255)  # オレンジ
-            self._draw_down_arrow(vis_frame, center_x, center_y, arrow_color)
-            direction_text = "SLOW"
-            
-        elif decision['action'] == "CAREFUL":
-            # 注意進行 - 黄色の上矢印
-            arrow_color = (0, 255, 255)  # 黄色
-            self._draw_up_arrow(vis_frame, center_x, center_y, arrow_color)
-            direction_text = "CAREFUL"
-            
-        else:  # GO
-            # 前進 OK - 緑色の上矢印
-            arrow_color = (0, 255, 0)  # 緑
-            self._draw_up_arrow(vis_frame, center_x, center_y, arrow_color)
-            direction_text = "GO"
-        
-        # === 方向テキスト表示 ===
-        text_bg_color = (0, 0, 0)
-        cv2.rectangle(vis_frame, (center_x - 60, center_y + 100), 
-                      (center_x + 60, center_y + 140), text_bg_color, -1)
-        cv2.putText(vis_frame, direction_text, (center_x - 30, center_y + 125), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.5, arrow_color, 3)
-        
-        # === 上部ステータスバー ===
-        # ステータス背景
-        cv2.rectangle(vis_frame, (0, 0), (width, 60), (0, 0, 0), -1)
-        
-        # 進行可否ステータス
-        if decision['urgency'] >= 8:
-            status_text = "DANGER - STOP IMMEDIATELY"
-            status_color = (0, 0, 255)
-        elif decision['urgency'] >= 5:
-            status_text = "CAUTION - PROCEED CAREFULLY"
-            status_color = (0, 165, 255)
-        else:
-            status_text = "SAFE - PROCEED FORWARD"
-            status_color = (0, 255, 0)
-        
-        cv2.putText(vis_frame, status_text, (10, 35), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
-        
-        # === 下部情報パネル ===
-        # 情報背景
-        cv2.rectangle(vis_frame, (0, height - 80), (width, height), (0, 0, 0), -1)
-        
-        # 障害物情報
-        danger_objects = [obj for obj in objects if obj['distance'] < self.config.safety_distances.detection_range]
-        if danger_objects:
-            closest = min(danger_objects, key=lambda x: x['distance'])
-            obstacle_text = f"OBSTACLE: {closest['type']} ({closest['distance']:.1f}m)"
-            obstacle_color = (0, 0, 255) if closest['distance'] < self.config.safety_distances.emergency_distance else (0, 165, 255)
-        else:
-            obstacle_text = f"OBSTACLE: None (Range: {self.config.safety_distances.detection_range}m)"
-            obstacle_color = (0, 255, 0)
-        
-        cv2.putText(vis_frame, obstacle_text, (10, height - 50), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, obstacle_color, 2)
-        
-        # システム情報
-        info_text = f"FPS: {self.fps:.1f} | Time: {int(time.time() - self.start_time)}s"
-        cv2.putText(vis_frame, info_text, (10, height - 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        
-        # 信頼度情報
-        conf_text = f"Confidence: {decision['confidence']:.2f}"
-        cv2.putText(vis_frame, conf_text, (width - 200, height - 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        
-        # === 障害物の簡易表示 ===
-        for obj in objects:
-            if obj['distance'] < self.config.safety_distances.detection_range:  # 設定された検知範囲内のみ
-                x1, y1, x2, y2 = obj['bbox']
-                
-                # 距離に応じた色（設定値に基づく）
-                if obj['distance'] < self.config.safety_distances.emergency_distance:
-                    box_color = (0, 0, 255)  # 赤：危険
-                elif obj['distance'] < self.config.safety_distances.caution_distance:
-                    box_color = (0, 165, 255)  # オレンジ：注意
-                elif obj['distance'] < self.config.safety_distances.safe_distance:
-                    box_color = (0, 255, 255)  # 黄色：安全圏内
-                else:
-                    box_color = (255, 255, 0)  # 黄緑：検知範囲内
-                
-                # 簡易ボックス
-                cv2.rectangle(vis_frame, (x1, y1), (x2, y2), box_color, 2)
-                
-                # 距離ラベル
-                dist_text = f"{obj['distance']:.1f}m"
-                cv2.putText(vis_frame, dist_text, (x1, y1 - 5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, box_color, 1)
-        
-        # === 緊急時の警告表示 ===
-        if decision['urgency'] >= 8:
-            # 点滅警告
-            if int(time.time() * 4) % 2 == 0:
-                # 画面全体に赤枠
-                cv2.rectangle(vis_frame, (0, 0), (width, height), (0, 0, 255), 15)
-                # 大きな警告テキスト
-                cv2.putText(vis_frame, "!! DANGER !!", (center_x - 120, 80), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 5)
-        
-        # === 制御ヒント ===
-        hint_text = "ESC: Exit | Arrow shows safe direction"
-        cv2.putText(vis_frame, hint_text, (10, height - 5), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
-        
-        # 表示
-        cv2.imshow('RC Controller - Forward Direction Guide', vis_frame)
-        
-        # ESCキーで終了
-        if cv2.waitKey(1) & 0xFF == 27:
-            self.running = False
     
     def _draw_up_arrow(self, frame: np.ndarray, x: int, y: int, color: Tuple[int, int, int]):
         """上向き矢印を描画"""
@@ -888,28 +772,28 @@ class RCController:
         print("システムを停止しました")
 
 def parse_arguments():
-    """コマンドライン引数を解析 - infer.json優先"""
-    parser = argparse.ArgumentParser(description='ラジコン式進行方向指示システム - infer.json完全対応')
+    """コマンドライン引数を解析"""
+    parser = argparse.ArgumentParser(description='ラジコン式進行方向指示システム - infer.toml対応')
     
-    parser.add_argument('--config', type=str, default='infer.json',
-                       help='infer.json設定ファイルパス - デフォルト: infer.json')
+    parser.add_argument('--config', type=str, default='infer.toml',
+                       help='設定ファイルパス - デフォルト: infer.toml')
     parser.add_argument('--emergency', type=float,
-                       help='緊急停止距離（メートル）- infer.json設定を上書き')
+                       help='緊急停止距離（メートル）- 設定を上書き')
     parser.add_argument('--caution', type=float,
-                       help='注意距離（メートル）- infer.json設定を上書き')
+                       help='注意距離（メートル）- 設定を上書き')
     parser.add_argument('--safe', type=float,
-                       help='安全距離（メートル）- infer.json設定を上書き')
+                       help='安全距離（メートル）- 設定を上書き')
     parser.add_argument('--range', type=float,
-                       help='検知範囲（メートル）- infer.json設定を上書き')
+                       help='検知範囲（メートル）- 設定を上書き')
     
     return parser.parse_args()
 
 def main():
-    """メイン関数 - infer.jsonを中心とした設定システム"""
+    """メイン関数"""
     args = parse_arguments()
     
-    # infer.jsonから設定を読み込み
-    print(f"infer.jsonファイル: {args.config}")
+    # 設定ファイルから設定を読み込み
+    print(f"設定ファイル: {args.config}")
     config = InferConfig.from_infer_file(args.config)
     
     # 設定の妥当性を検証
