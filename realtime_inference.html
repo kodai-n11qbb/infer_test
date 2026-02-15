@@ -43,6 +43,18 @@
         <div class="controls">
             <label for="inferenceIntervalMs">推論間隔 (ms):</label>
             <input type="number" id="inferenceIntervalMs" min="50" step="10" value="500" style="width:100px; padding: 5px;">
+            <div style="margin-top: 10px;">
+                <label for="distanceModelSelect">距離モデル:</label>
+                <select id="distanceModelSelect" style="padding: 5px;">
+                    <option value="./models/distance_model/model.json">distance_model</option>
+                </select>
+            </div>
+            <div style="margin-top: 10px;">
+                <label for="classificationModelSelect">分類モデル:</label>
+                <select id="classificationModelSelect" style="padding: 5px;">
+                    <option value="./models/classification_model/model.json">classification_model</option>
+                </select>
+            </div>
             <p style="font-size: 0.8em; color: #666; margin-top: 10px;">
                 ※COCO-SSDで物体を検出し、その領域に対してカスタムモデルで距離と種類を推定します。
             </p>
@@ -60,11 +72,20 @@
         const statusDiv = document.getElementById('status');
         const debugPanel = document.getElementById('debug-panel');
         const debugContent = document.getElementById('debug-content');
+        const distanceModelSelect = document.getElementById('distanceModelSelect');
+        const classificationModelSelect = document.getElementById('classificationModelSelect');
         
         // グローバル変数: 各種モデルとインターバル管理
         let distanceModel, classificationModel, cocoModel;
         let inferenceInterval = 500;
         let intervalId;
+
+        function getSelectedModelUrls() {
+            return {
+                distanceUrl: distanceModelSelect.value,
+                classificationUrl: classificationModelSelect.value,
+            };
+        }
 
         // 推論設定 (model.js から移植)
         const config = {
@@ -120,6 +141,20 @@
             }
         }
 
+        async function loadCustomModels() {
+            const { distanceUrl, classificationUrl } = getSelectedModelUrls();
+            distanceModel = null;
+            classificationModel = null;
+
+            updateStatus('モデル読み込み中... (2/3 distance_model)', 'info');
+            await assertTfjsLayersModelAssetsOk(distanceUrl);
+            distanceModel = await tf.loadLayersModel(distanceUrl);
+
+            updateStatus('モデル読み込み中... (3/3 classification_model)', 'info');
+            await assertTfjsLayersModelAssetsOk(classificationUrl);
+            classificationModel = await tf.loadLayersModel(classificationUrl);
+        }
+
         /**
          * モデルのロード処理
          * COCO-SSD, 距離推定モデル, 分類モデルの3つを読み込む
@@ -130,17 +165,8 @@
                 
                 // 1. COCO-SSD (汎用物体検出) のロード
                 cocoModel = await cocoSsd.load();
-                
-                // 2. 距離推定モデルのロード (カスタム生成された model.json)
-                // GraphModel と LayersModel の両方の形式を試行する
-                updateStatus('モデル読み込み中... (2/3 distance_model)', 'info');
-                await assertTfjsLayersModelAssetsOk('./models/distance_model/model.json');
-                distanceModel = await tf.loadLayersModel('./models/distance_model/model.json');
 
-                // 3. 物体分類モデルのロード (カスタム生成された model.json)
-                updateStatus('モデル読み込み中... (3/3 classification_model)', 'info');
-                await assertTfjsLayersModelAssetsOk('./models/classification_model/model.json');
-                classificationModel = await tf.loadLayersModel('./models/classification_model/model.json');
+                await loadCustomModels();
 
                 updateStatus('全モデル読み込み完了', 'success');
             } catch (e) {
@@ -360,6 +386,24 @@
                 startInference();
             }
         });
+
+        async function reloadSelectedModels() {
+            try {
+                if (!cocoModel) {
+                    await loadModels();
+                    return;
+                }
+                updateStatus('モデル切替中...', 'info');
+                await loadCustomModels();
+                updateStatus('モデル切替完了', 'success');
+            } catch (e) {
+                console.error('モデル切替失敗:', e);
+                updateStatus('モデル切替失敗: ' + (e?.message || String(e)), 'error');
+            }
+        }
+
+        distanceModelSelect.addEventListener('change', reloadSelectedModels);
+        classificationModelSelect.addEventListener('change', reloadSelectedModels);
 
         /**
          * アプリケーションの初期化
