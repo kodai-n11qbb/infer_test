@@ -11,20 +11,110 @@ import tomllib
 import os
 import numpy as np
 import warnings
+import json
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+def create_tfjs_model_structure(model, output_dir):
+    """
+    TensorFlowをインポートせずに、KerasモデルからTFJS Layers形式のmodel.jsonを生成する。
+    TFJSのInputLayerエラーを回避するため、完全に互換性のある構造を手動で構築する。
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 重みManifestの作成
+    weights = model.get_weights()
+    weights_binary = b""
+    weight_entries = []
+    
+    # Sequentialモデルのレイヤー構成を取得
+    # 手動で簡略化したLayers構成を構築（InputLayerエラー回避用）
+    layers_config = []
+    weight_idx = 0
+    
+    # 各レイヤーの構成を取得して変換
+    for i, layer in enumerate(model.layers):
+        l_config = layer.get_config()
+        class_name = layer.__class__.__name__
+        
+        # 最初のレイヤーに入力形状を注入 (model.build()後の値を参照)
+        if i == 0:
+            # Sequentialモデルのbuild済み形状から取得
+            l_config["batch_input_shape"] = [None] + list(model.input_shape[1:])
+        
+        # 【重要】dtypeがオブジェクト（DTypePolicy等）の場合、TFJSが解釈できず [object Object] エラーになるため、
+        # 強制的に単純な文字列 "float32" に置換する
+        if "dtype" in l_config:
+            l_config["dtype"] = "float32"
+        
+        layers_config.append({
+            "class_name": class_name,
+            "config": l_config
+        })
+        
+        # 重み情報の処理
+        layer_weights = layer.get_weights()
+        if layer_weights:
+            # kernel
+            kernel = layer_weights[0]
+            kernel_name = f"{layer.name}/kernel"
+            weight_entries.append({
+                "name": kernel_name,
+                "shape": list(kernel.shape),
+                "dtype": "float32"
+            })
+            weights_binary += kernel.astype('float32').tobytes()
+            
+            # bias
+            if len(layer_weights) > 1:
+                bias = layer_weights[1]
+                bias_name = f"{layer.name}/bias"
+                weight_entries.append({
+                    "name": bias_name,
+                    "shape": list(bias.shape),
+                    "dtype": "float32"
+                })
+                weights_binary += bias.astype('float32').tobytes()
+
+    # TFJS形式のmodel.jsonの構築
+    tfjs_model = {
+        "format": "layers-model",
+        "generatedBy": "custom-script",
+        "convertedBy": None,
+        "modelTopology": {
+            "class_name": "Sequential",
+            "config": {
+                "name": "sequential",
+                "layers": layers_config
+            },
+            "keras_version": "2.13.1", # 互換性の高いバージョンを明示
+            "backend": "tensorflow"
+        },
+        "weightsManifest": [
+            {
+                "paths": ["group1-shard1of1.bin"],
+                "weights": weight_entries
+            }
+        ]
+    }
+    
+    # model.jsonの保存
+    with open(os.path.join(output_dir, "model.json"), "w") as f:
+        json.dump(tfjs_model, f, indent=2)
+    
+    # 重みバイナリの保存
+    with open(os.path.join(output_dir, "group1-shard1of1.bin"), "wb") as f:
+        f.write(weights_binary)
 
 def check_dependencies():
     """依存ライブラリをチェック"""
     try:
         import tensorflow as tf
-        import tensorflowjs as tfjs
-        print("依存ライブラリ OK")
-        return tf, tfjs
+        print("TensorFlow OK")
+        return tf
     except ImportError as e:
-        print(f"依存ライブラリが不足: {e}")
-        print("pip install tensorflow tensorflowjs を実行してください")
-        return None, None
+        print(f"TensorFlow がインストールされていません: {e}")
+        return None
 
 def generate_distance_data(distance_estimation_config):
     """距離推定の訓練データを生成 (面積 -> 距離 のルールを近似)"""
@@ -97,23 +187,25 @@ def create_classification_model(object_classification_config, tf):
     return model
 
 def main():
-    tf, tfjs = check_dependencies()
-    if not tf or not tfjs:
+    tf = check_dependencies()
+    if not tf:
         return
     # infer.toml を読み込む
     with open('infer.toml', 'rb') as f:
         config = tomllib.load(f)
     # models ディレクトリを作成
     os.makedirs('models', exist_ok=True)
+    
     # 距離推定モデル
     print("距離推定モデルを作成中...")
     dist_model = create_distance_model(config['distance_estimation'], tf)
-    tfjs.converters.save_keras_model(dist_model, 'models/distance_model')
+    create_tfjs_model_structure(dist_model, 'models/distance_model')
     print("距離推定モデル保存完了: models/distance_model")
+    
     # 物体分類モデル
     print("物体分類モデルを作成中...")
     class_model = create_classification_model(config['object_classification'], tf)
-    tfjs.converters.save_keras_model(class_model, 'models/classification_model')
+    create_tfjs_model_structure(class_model, 'models/classification_model')
     print("物体分類モデル保存完了: models/classification_model")
 
 if __name__ == '__main__':

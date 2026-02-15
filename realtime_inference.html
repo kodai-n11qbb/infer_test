@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>リアルタイム物体推論 (距離・分類)</title>
+    <!-- TensorFlow.js コアライブラリの読み込み -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background: #f0f0f0; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .status { padding: 10px; margin-bottom: 10px; border-radius: 4px; font-weight: bold; }
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .video-container { background: #000; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .controls { margin-top: 15px; background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        label { font-weight: bold; margin-right: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>リアルタイム推論モニター</h1>
+        
+        <!-- ステータス表示エリア -->
+        <div id="status" class="status info">初期化中...</div>
+
+        <!-- デバッグパネル: 自作モデルの入出力をリアルタイム表示 -->
+        <div id="debug-panel" style="background: rgba(0,0,0,0.8); color: #00FF00; padding: 10px; margin-bottom: 10px; border-radius: 4px; font-family: monospace; font-size: 12px; display: none;">
+            <h3>[自作モデル・デバッグ情報]</h3>
+            <div id="debug-content">検出待ち...</div>
+        </div>
+        
+        <!-- 映像表示エリア: ビデオと描画用キャンバスを重ねる -->
+        <div class="video-container" style="position: relative; width: 640px; height: 480px;">
+            <!-- カメラ映像入力用 -->
+            <video id="video" width="640" height="480" autoplay playsinline style="position: absolute; top: 0; left: 0;"></video>
+            <!-- 推論結果（枠とテキスト）描画用 -->
+            <canvas id="canvas" width="640" height="480" style="position: absolute; top: 0; left: 0; pointer-events: none;"></canvas>
+        </div>
+
+        <!-- ユーザー操作パネル -->
+        <div class="controls">
+            <label for="inferenceIntervalMs">推論間隔 (ms):</label>
+            <input type="number" id="inferenceIntervalMs" min="50" step="10" value="500" style="width:100px; padding: 5px;">
+            <p style="font-size: 0.8em; color: #666; margin-top: 10px;">
+                ※COCO-SSDで物体を検出し、その領域に対してカスタムモデルで距離と種類を推定します。
+            </p>
+        </div>
+    </div>
+
+    <!-- 物体検出モデル (COCO-SSD) の読み込み -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+    
+    <script>
+        // DOM要素の取得
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const statusDiv = document.getElementById('status');
+        const debugPanel = document.getElementById('debug-panel');
+        const debugContent = document.getElementById('debug-content');
+        
+        // グローバル変数: 各種モデルとインターバル管理
+        let distanceModel, classificationModel, cocoModel;
+        let inferenceInterval = 500;
+        let intervalId;
+
+        // 推論設定 (model.js から移植)
+        const config = {
+            "detection_settings": {
+                "min_object_area": 300,  // 推論対象とする最小面積
+                "max_object_area": 50000, // 推論対象とする最大面積
+            }
+        };
+
+        /**
+         * モデルのロード処理
+         * COCO-SSD, 距離推定モデル, 分類モデルの3つを読み込む
+         */
+        async function loadModels() {
+            try {
+                updateStatus('モデル読み込み中...', 'info');
+                
+                // 1. COCO-SSD (汎用物体検出) のロード
+                cocoModel = await cocoSsd.load();
+                
+                // 2. 距離推定モデルのロード (カスタム生成された model.json)
+                // GraphModel と LayersModel の両方の形式を試行する
+                try {
+                    distanceModel = await tf.loadGraphModel('./models/distance_model/model.json');
+                } catch (e) {
+                    distanceModel = await tf.loadLayersModel('./models/distance_model/model.json');
+                }
+
+                // 3. 物体分類モデルのロード (カスタム生成された model.json)
+                try {
+                    classificationModel = await tf.loadGraphModel('./models/classification_model/model.json');
+                } catch (e) {
+                    classificationModel = await tf.loadLayersModel('./models/classification_model/model.json');
+                }
+
+                updateStatus('全モデル読み込み完了', 'success');
+            } catch (e) {
+                console.error('モデルロード失敗:', e);
+                updateStatus('モデル読み込み失敗: ' + e.message, 'error');
+            }
+        }
+
+        /**
+         * カメラの起動処理
+         */
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 640, height: 480 } 
+                });
+                video.srcObject = stream;
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => resolve();
+                });
+            } catch (e) {
+                console.error('カメラ起動失敗:', e);
+                updateStatus('カメラの起動に失敗しました', 'error');
+            }
+        }
+
+        /**
+         * 指定された領域 (bbox) の平均HSV色相 (Hue) を計算
+         * 分類モデルの入力として使用
+         */
+        function getRegionHue(imageData, bbox) {
+            const [x, y, w, bboxH] = bbox;
+            let rSum = 0, gSum = 0, bSum = 0, count = 0;
+
+            // 領域内のピクセルをスキャン
+            for (let i = Math.floor(y); i < y + bboxH; i++) {
+                for (let j = Math.floor(x); j < x + w; j++) {
+                    if (i >= 0 && i < imageData.height && j >= 0 && j < imageData.width) {
+                        const idx = (i * imageData.width + j) * 4;
+                        rSum += imageData.data[idx];
+                        gSum += imageData.data[idx+1];
+                        bSum += imageData.data[idx+2];
+                        count++;
+                    }
+                }
+            }
+            
+            if (count === 0) return [0, 128, 128]; // デフォルト値
+
+            // RGBからHSVへの簡易変換
+            const r = rSum / count, g = gSum / count, b = bSum / count;
+            const max = Math.max(r, g, b), min = Math.min(r, g, b);
+            let h, s = max === 0 ? 0 : (max - min) / max, v = max / 255;
+            
+            if (max === min) h = 0;
+            else {
+                const d = max - min;
+                switch (max) {
+                    case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                    case g: h = (b - r) / d + 2; break;
+                    case b: h = (r - g) / d + 4; break;
+                }
+                h /= 6;
+            }
+            return [h * 360, s * 255, v * 255];
+        }
+
+        /**
+         * 推論処理のメインループ
+         * 1フレーム取得 -> 物体検出 -> カスタム推論 -> 結果描画
+         */
+        async function processFrame() {
+            try {
+                // モデルまたはビデオの準備ができていない場合はスキップ
+                if (!cocoModel || !distanceModel || !classificationModel || video.readyState < 2) {
+                    requestAnimationFrame(() => setTimeout(processFrame, inferenceInterval));
+                    return;
+                }
+
+                // 描画サイズを実際の表示サイズに合わせる (重要: これがズレると枠が表示されない)
+                canvas.width = video.clientWidth;
+                canvas.height = video.clientHeight;
+
+                // 1. COCO-SSDで物体検出
+                const predictions = await cocoModel.detect(video);
+
+                // 2. 描画のリセット
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                let debugText = "";
+
+                if (predictions && predictions.length > 0) {
+                    // 色計算(HSV)用に現在のフレームをキャプチャ (ビデオの元の解像度で)
+                    const offCanvas = document.createElement('canvas');
+                    offCanvas.width = video.videoWidth;
+                    offCanvas.height = video.videoHeight;
+                    const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+                    offCtx.drawImage(video, 0, 0);
+                    const imageData = offCtx.getImageData(0, 0, offCanvas.width, offCanvas.height);
+
+                    // 描画用のスケール計算 (ビデオ解像度 -> 表示サイズ)
+                    const scaleX = canvas.width / video.videoWidth;
+                    const scaleY = canvas.height / video.videoHeight;
+
+                    for (const p of predictions) {
+                        const [x, y, w, h] = p.bbox;
+                        const area = w * h;
+
+                        // 面積フィルタリング (小さすぎるノイズを無視)
+                        if (area < 300) continue;
+
+                        // 4. 特徴量 (色相) の抽出
+                        const [hVal, sVal, vVal] = getRegionHue(imageData, p.bbox);
+
+                        // 5. 自作距離推定モデルによる推論
+                        const distance = tf.tidy(() => {
+                            const input = tf.tensor2d([area], [1, 1]);
+                            const result = distanceModel.predict(input);
+                            return result.dataSync()[0];
+                        });
+
+                        // 6. 自作物体分類モデルによる推論
+                        const { type, confidence } = tf.tidy(() => {
+                            const input = tf.tensor2d([[area, hVal, sVal, vVal]]);
+                            const result = classificationModel.predict(input);
+                            const scores = result.dataSync();
+                            const idx = scores.indexOf(Math.max(...scores));
+                            const labels = ['大型車両', '車両', '危険物', '一般物体'];
+                            return { type: labels[idx], confidence: scores[idx] };
+                        });
+
+                        debugText += `[${p.class}] 面積:${Math.round(area)} => 距離:${distance.toFixed(1)}m<br>`;
+
+                        // 7. 推論結果の描画 (表示サイズに合わせてスケール調整)
+                        drawResult(x * scaleX, y * scaleY, w * scaleX, h * scaleY, distance, type, p.class, area, hVal);
+                    }
+                }
+
+                if (debugText) {
+                    debugPanel.style.display = 'block';
+                    debugContent.innerHTML = debugText;
+                } else {
+                    debugContent.innerHTML = "物体を検出していません";
+                }
+
+            } catch (err) {
+                console.error("推論エラー:", err);
+            }
+
+            setTimeout(() => {
+                requestAnimationFrame(processFrame);
+            }, inferenceInterval);
+        }
+
+        /**
+         * 推論結果の描画 (太い緑枠と黒背景ラベル)
+         */
+        function drawResult(x, y, w, h, dist, type, cocoClass, area, hVal) {
+            // 緑の太枠
+            ctx.strokeStyle = '#00FF00';
+            ctx.lineWidth = 6;
+            ctx.strokeRect(x, y, w, h);
+
+            // ラベル表示
+            const mainLabel = `${type} (${dist.toFixed(1)}m)`;
+            ctx.font = 'bold 24px sans-serif';
+            const textWidth = ctx.measureText(mainLabel).width;
+
+            // ラベル背景
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+            ctx.fillRect(x, y - 45, Math.max(textWidth + 20, 200), 45);
+
+            // テキスト
+            ctx.fillStyle = '#00FF00';
+            ctx.fillText(mainLabel, x + 10, y - 12);
+
+            // 危険警告
+            if (dist < 3.0) {
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.4)';
+                ctx.fillRect(x, y, w, h);
+                ctx.fillStyle = '#FF0000';
+                ctx.font = 'bold 32px sans-serif';
+                ctx.fillText('⚠ 衝突注意', x + 10, y + 40);
+            }
+        }
+
+        /**
+         * ステータス表示の更新
+         */
+        function updateStatus(message, type) {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+        }
+
+        /**
+         * 推論ループの開始
+         */
+        function startInference() {
+            if (intervalId) clearInterval(intervalId);
+            intervalId = setInterval(processFrame, inferenceInterval);
+        }
+
+        // イベントリスナー: 推論間隔の変更
+        document.getElementById('inferenceIntervalMs').addEventListener('change', (e) => {
+            const val = parseInt(e.target.value);
+            if (val >= 50) {
+                inferenceInterval = val;
+                startInference();
+            }
+        });
+
+        /**
+         * アプリケーションの初期化
+         */
+        async function init() {
+            await loadModels();
+            await startCamera();
+            startInference();
+        }
+
+        // 実行開始
+        init();
+    </script>
+</body>
+</html>
