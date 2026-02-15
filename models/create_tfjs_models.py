@@ -8,8 +8,7 @@ TensorFlow モデルをトレーニングして TensorFlow.js 形式でエクス
 """
 
 import numpy as np
-import tensorflow as tf
-import tensorflowjs as tfjs
+import json
 import os
 import sys
 
@@ -62,6 +61,8 @@ def create_distance_model():
     距離推定モデルを作成: 入力面積, 出力距離
     シンプルな NN でルールベースのステップ関数を近似
     """
+    import tensorflow as tf
+
     model = tf.keras.Sequential([
         tf.keras.layers.Dense(64, activation='relu', input_shape=(1,)),
         tf.keras.layers.Dense(32, activation='relu'),
@@ -102,6 +103,8 @@ def create_classification_model():
     """
     物体分類モデルを作成: 入力面積+H+S+V, 出力4クラスの確率
     """
+    import tensorflow as tf
+
     model = tf.keras.Sequential([
         tf.keras.layers.Dense(64, activation='relu', input_shape=(4,)),
         tf.keras.layers.Dense(32, activation='relu'),
@@ -110,7 +113,74 @@ def create_classification_model():
     model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
     return model
 
+def patch_tfjs_layers_model_json(model_json_path: str):
+    """tfjs layers-model の model.json をブラウザ互換のキーに補正する。
+
+    背景:
+    - Keras v3 系から出た JSON は InputLayer の config に `batch_shape` が入ることがある
+    - TFJS のデシリアライザは `batchInputShape` または `inputShape` を期待するためロードで落ちる
+    """
+
+    if not os.path.exists(model_json_path):
+        raise FileNotFoundError(model_json_path)
+
+    with open(model_json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    # layers-model 以外なら何もしない
+    if data.get('format') != 'layers-model':
+        return
+
+    model_topology = data.get('modelTopology') or {}
+    model_config = (model_topology.get('model_config') or {}).get('config') or {}
+    model_name = model_config.get('name')
+    layers = model_config.get('layers') or []
+
+    changed = False
+    for layer in layers:
+        if layer.get('class_name') != 'InputLayer':
+            continue
+
+        cfg = layer.get('config') or {}
+        if 'batch_shape' in cfg and 'batchInputShape' not in cfg:
+            cfg['batchInputShape'] = cfg.get('batch_shape')
+            del cfg['batch_shape']
+            changed = True
+
+        if 'batchInputShape' in cfg and 'inputShape' in cfg:
+            del cfg['inputShape']
+            changed = True
+
+        layer['config'] = cfg
+
+    # weightsManifest 側の重み名も補正
+    # 例: 'sequential/dense/kernel' -> 'dense/kernel'
+    # TFJS 側はモデル名プレフィックス無しで変数を作ることがあり、ここがズレるとロードで落ちる。
+    weights_manifest = data.get('weightsManifest') or []
+    if model_name and weights_manifest:
+        prefix = model_name + '/'
+        for group in weights_manifest:
+            weights = group.get('weights') or []
+            for w in weights:
+                name = w.get('name')
+                if isinstance(name, str) and name.startswith(prefix):
+                    w['name'] = name[len(prefix):]
+                    changed = True
+
+    if changed:
+        with open(model_json_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False)
+
 def main():
+    if '--patch-only' in sys.argv:
+        patch_tfjs_layers_model_json('models/distance_model/model.json')
+        patch_tfjs_layers_model_json('models/classification_model/model.json')
+        print('patched model.json files')
+        return
+
+    import tensorflow as tf
+    import tensorflowjs as tfjs
+
     print("rc_system.py のロジックを TensorFlow.js モデルに変換開始")
 
     # 距離推定モデル
@@ -144,6 +214,10 @@ def main():
     print("TensorFlow.js 形式に変換")
     tfjs.converters.save_keras_model(dist_model, 'models/distance_model')
     tfjs.converters.save_keras_model(class_model, 'models/classification_model')
+
+    # ブラウザの TFJS でロードできる形に補正
+    patch_tfjs_layers_model_json('models/distance_model/model.json')
+    patch_tfjs_layers_model_json('models/classification_model/model.json')
 
     print("モデル変換完了: models/distance_model/model.json と models/classification_model/model.json が作成されました")
     print("realtime_inference.html でロード可能です")

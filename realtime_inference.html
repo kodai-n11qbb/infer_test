@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>リアルタイム物体推論 (距離・分類)</title>
     <!-- TensorFlow.js コアライブラリの読み込み -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
     <style>
         body { font-family: sans-serif; margin: 20px; background: #f0f0f0; }
         .container { max-width: 800px; margin: 0 auto; }
@@ -74,36 +74,81 @@
             }
         };
 
+        // 想定外エラーをUIに出す（コンソール見ない運用だとここがないと詰む）
+        window.addEventListener('error', (ev) => {
+            const msg = ev?.error?.stack || ev?.message || String(ev);
+            console.error('window.onerror:', ev);
+            updateStatus('エラー: ' + msg, 'error');
+        });
+
+        window.addEventListener('unhandledrejection', (ev) => {
+            const msg = ev?.reason?.stack || ev?.reason?.message || String(ev?.reason || ev);
+            console.error('unhandledrejection:', ev);
+            updateStatus('Promiseエラー: ' + msg, 'error');
+        });
+
+        async function assertFetchOk(url) {
+            // file:// で開いている場合はまずここで死ぬことが多い
+            const res = await fetch(url, { cache: 'no-store' });
+            if (!res.ok) {
+                throw new Error(`Fetch failed: ${url} (HTTP ${res.status})`);
+            }
+            return true;
+        }
+
+        async function assertTfjsLayersModelAssetsOk(modelJsonUrl) {
+            // model.json と、そこから参照される weight shard(.bin) まで取れるかチェック
+            // ここが通らないと loadLayersModel は黙ってコケたり、意味不明な例外になる。
+            const res = await fetch(modelJsonUrl, { cache: 'no-store' });
+            if (!res.ok) {
+                throw new Error(`Fetch failed: ${modelJsonUrl} (HTTP ${res.status})`);
+            }
+
+            const json = await res.json();
+            const weightsManifest = json.weightsManifest || [];
+
+            // model.json のディレクトリを基準に相対パスを解決
+            const baseUrl = new URL(modelJsonUrl, location.href);
+            baseUrl.pathname = baseUrl.pathname.substring(0, baseUrl.pathname.lastIndexOf('/') + 1);
+
+            for (const group of weightsManifest) {
+                const paths = group.paths || [];
+                for (const p of paths) {
+                    const wUrl = new URL(p, baseUrl).toString();
+                    await assertFetchOk(wUrl);
+                }
+            }
+        }
+
         /**
          * モデルのロード処理
          * COCO-SSD, 距離推定モデル, 分類モデルの3つを読み込む
          */
         async function loadModels() {
             try {
-                updateStatus('モデル読み込み中...', 'info');
+                updateStatus('モデル読み込み中... (1/3 COCO-SSD)', 'info');
                 
                 // 1. COCO-SSD (汎用物体検出) のロード
                 cocoModel = await cocoSsd.load();
                 
                 // 2. 距離推定モデルのロード (カスタム生成された model.json)
                 // GraphModel と LayersModel の両方の形式を試行する
-                try {
-                    distanceModel = await tf.loadGraphModel('./models/distance_model/model.json');
-                } catch (e) {
-                    distanceModel = await tf.loadLayersModel('./models/distance_model/model.json');
-                }
+                updateStatus('モデル読み込み中... (2/3 distance_model)', 'info');
+                await assertTfjsLayersModelAssetsOk('./models/distance_model/model.json');
+                distanceModel = await tf.loadLayersModel('./models/distance_model/model.json');
 
                 // 3. 物体分類モデルのロード (カスタム生成された model.json)
-                try {
-                    classificationModel = await tf.loadGraphModel('./models/classification_model/model.json');
-                } catch (e) {
-                    classificationModel = await tf.loadLayersModel('./models/classification_model/model.json');
-                }
+                updateStatus('モデル読み込み中... (3/3 classification_model)', 'info');
+                await assertTfjsLayersModelAssetsOk('./models/classification_model/model.json');
+                classificationModel = await tf.loadLayersModel('./models/classification_model/model.json');
 
                 updateStatus('全モデル読み込み完了', 'success');
             } catch (e) {
                 console.error('モデルロード失敗:', e);
-                updateStatus('モデル読み込み失敗: ' + e.message, 'error');
+                const hint = (location.protocol === 'file:')
+                    ? ' (ヒント: file:// で開くと fetch が通らないことがある。httpサーバで開け)'
+                    : '';
+                updateStatus('モデル読み込み失敗: ' + (e?.message || String(e)) + hint, 'error');
             }
         }
 
@@ -163,7 +208,7 @@
                 }
                 h /= 6;
             }
-            return [h * 360, s * 255, v * 255];
+            return [h * 180, s * 255, v * 255];
         }
 
         /**
@@ -210,19 +255,22 @@
                         // 面積フィルタリング (小さすぎるノイズを無視)
                         if (area < 300) continue;
 
+                        // 学習データの分布に合わせる（このモデルは 100..20000 くらいで学習している）
+                        const areaForModel = Math.min(Math.max(area, 100), 20000);
+
                         // 4. 特徴量 (色相) の抽出
                         const [hVal, sVal, vVal] = getRegionHue(imageData, p.bbox);
 
                         // 5. 自作距離推定モデルによる推論
                         const distance = tf.tidy(() => {
-                            const input = tf.tensor2d([area], [1, 1]);
+                            const input = tf.tensor2d([areaForModel], [1, 1], 'float32');
                             const result = distanceModel.predict(input);
                             return result.dataSync()[0];
                         });
 
                         // 6. 自作物体分類モデルによる推論
                         const { type, confidence } = tf.tidy(() => {
-                            const input = tf.tensor2d([[area, hVal, sVal, vVal]]);
+                            const input = tf.tensor2d([[areaForModel, hVal, sVal, vVal]], [1, 4], 'float32');
                             const result = classificationModel.predict(input);
                             const scores = result.dataSync();
                             const idx = scores.indexOf(Math.max(...scores));
@@ -297,8 +345,11 @@
          * 推論ループの開始
          */
         function startInference() {
-            if (intervalId) clearInterval(intervalId);
-            intervalId = setInterval(processFrame, inferenceInterval);
+            if (intervalId) {
+                clearTimeout(intervalId);
+                intervalId = null;
+            }
+            processFrame();
         }
 
         // イベントリスナー: 推論間隔の変更
